@@ -17,16 +17,13 @@ from urllib.parse import quote
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
 
-fm_token = os.environ.get("fm_token") or ""
-# 以下两个参数抓一次后续无需更新
-fm_pto = os.environ.get("fm_pto") or ""
-fm_par = os.environ.get("fm_par") or ""
+fm_account = os.environ.get("fm_account") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
+DDDD_SLIDE_URL = os.environ.get("DDDD_SLIDE_URL") or "" # DDDD滑块验证码识别服务地址
 
-if fm_token is None:
-    print("请设置环境变量fm_token")
+if fm_account == "" or DDDD_SLIDE_URL == "":
+    print("请设置环境变量fm_account和DDDD_SLIDE_URL")
     exit(1)
-
 
 class Utils:
     def __init__(self):
@@ -37,12 +34,29 @@ class Utils:
         self.p = self.read_file("p.txt")
         self.ak = self.genak()
         self.ed = self.re(self.ak, self.pfile)
-        # self.pto = self.re(self.ak, self.p)
-        # self.dataa = '{"device_key":"261ff2afcf5843bcd9ac94e46338de181"}'
-        # self.par = self.secret(self.dataa, self.ak)
+        self.pto = self.re(self.ak, self.p)
+        self.device_token, self.device_key = self.read_device()
+        self.dataa = '{"device_key":"' + self.device_key + '"}'
+        self.par = self.secret(self.dataa, self.ak)
         # pto和par写死即可，并不校验
-        self.pto = fm_pto
-        self.par = fm_par
+        # self.pto = fm_pto
+        # self.par = fm_par
+
+    # 读取设备token和key
+    def read_device(self):
+        if os.path.exists('device.txt'):
+            with open('device.txt', 'r') as f:
+                device_token = f.readline().strip()
+                device_key = f.readline().strip()
+                return device_token, device_key
+        else:
+            # 生成一个随机device_token和device_key
+            device_token = ''.join(random.choices(string.ascii_letters + string.digits, k=16))
+            device_key = ''.join(random.choices(string.ascii_letters + string.digits, k=33))
+            with open('device.txt', 'w') as f:
+                f.write(f"{device_token}\n{device_key}")
+            print(f"【生成设备token和key】{device_token} {device_key} 已保存到device.txt")
+            return device_token, device_key
 
     # 读取文件
     def read_file(self, file_name):
@@ -144,7 +158,8 @@ class Request:
         self.session = requests.Session()
         self.session.headers.update({
             "Content-Type": "application/x-www-form-urlencoded",
-            "token": fm_token,
+            "token": "",
+            "devicetoken": self.utils.device_token,
             "Host": "fmpapi.feimaoyun.com",
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
             "os": "android",
@@ -190,6 +205,12 @@ class Function:
     def __init__(self):
         self.utils = Utils()
         self.request = Request()
+        self.new_version = ""
+        self.account = fm_account.split('&')[0]
+        self.password = fm_account.split('&')[1]
+        # 添加geetest相关配置
+        self.geetest_captcha_id = "36df6e46b1d10baf1858267b6f468a63"  # 飞猫盘的geetest captcha_id
+        self.geetest_js_url = "https://static.geetest.com/v4/static/v1.8.9-2b7f0f/js/gcaptcha4.js"
 
     def get_uid(self):
         uid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
@@ -215,13 +236,119 @@ class Function:
     def get_version(self):
         getVersionRes = self.request.post("https://fmpapi.feimaoyun.com/user-service/common/getAppUpdateInfo", {})
         server_version = getVersionRes['server_version']
+        self.new_version = getVersionRes['new_version']
         self.request.session.headers.update({
             "fmver": server_version,
         })
+        return getVersionRes
+
+    # 获取geetest验证码
+    def get_geetest_captcha(self):
+        try:
+            # 导入geetest crack模块
+            import sys
+            import os
+            sys.path.append(os.path.join(os.path.dirname(__file__), 'geetest-v4-slide-crack'))
+            from crack import Crack
+            crack = Crack(self.geetest_captcha_id, self.geetest_js_url, DDDD_SLIDE_URL)
+            crack.load()
+            res = crack.verify()
+
+            if res.get('status') == 'success':
+                if res['data']['result'] == 'success':
+                    return res['data']['seccode']
+                else:
+                    return self.get_geetest_captcha()
+            else:
+                print(f"【geetest验证失败】{res}")
+                return None
+        except Exception as e:
+            print(f"【geetest验证异常】{e}")
+            return None
+
+    # 登录验证
+    def login_verify(self):
+        url = "https://fmpapi.feimaoyun.com/user-service/passport/userLoginVerify"
+        body = {
+            "password": self.password,
+            "username": self.account
+        }
+        try:
+            loginVerifyRes = self.request.post(url, body)
+            user_id = loginVerifyRes['list'][0]['user_id']
+            return user_id
+        except Exception as e:
+            print(f"【登录验证失败】{e}")
+            return False
+
+    # 登录
+    def login(self):
+        url = "https://fmpapi.feimaoyun.com/user-service/passport/login"
+
+        # 获取geetest验证码
+        captcha_data = self.get_geetest_captcha()
+        if not captcha_data:
+            print("【登录】获取验证码失败")
+            return False
+
+        # 获取用户ID
+        user_id = self.login_verify()
+        if not user_id:
+            print("【登录】获取用户ID失败")
+            return False
+
+        body = {
+            "logintp": "phone",
+            "app_version": self.new_version,
+            "gen_time": captcha_data['gen_time'],
+            "captcha_output": captcha_data['captcha_output'],
+            "lot_number": captcha_data['lot_number'],
+            "network": "WiFi",
+            "password": self.password,
+            "device_name": "Redmi  M2012K11AC",
+            "sys_version": "Android 12",
+            "user_id": user_id,
+            "device_alias_name": "HUAWEI P40",
+            "pass_token": captcha_data['pass_token'],
+            "username": self.account
+        }
+        try:
+            loginRes = self.request.post(url, body)
+            token = loginRes.get('token', '')
+            if loginRes.get('token', ''):
+                print(f"【登录】成功")
+                # 写入token
+                self.write_token(token)
+                return loginRes
+            else:
+                print(f"【登录】{loginRes}")
+                return False
+        except Exception as e:
+            print(f"【登录失败】{e}")
+            return False
+
+    # token写入文件
+    def write_token(self, token):
+        # 如果文件不存在，创建文件
+        if not os.path.exists('fm_token.txt'):
+            with open('fm_token.txt', 'w') as f:
+                f.write(token)
+        else:
+            with open('fm_token.txt', 'w') as f:
+                f.write(token)
+
+    # token读取文件
+    def read_token(self):
+        if os.path.exists('fm_token.txt'):
+            with open('fm_token.txt', 'r') as f:
+                return f.read()
+        else:
+            return None
 
     # 获取用户信息
     def get_user_info(self):
         userInfoRes = self.request.post("https://fmpapi.feimaoyun.com/user-service/user/info", {})
+        # print(f"【获取用户信息】{userInfoRes}")
         # userInfo = userInfoRes['data']
         userId = userInfoRes['user_id']
         print(f"【获取用户信息】用户ID：{userId}")
@@ -283,12 +410,22 @@ class Function:
         if 'msg' in signinRes:
             print(f'【APP签到】{signinRes["msg"]}')
             if '请先登录' in signinRes['msg']:
-                # 账号过期，推送消息
-                if PUSHPLUS_TOKEN:
-                    self.push_message()
+                print('【token过期】尝试登录')
+                # 登录
+                loginRes = self.login()
+                if loginRes:
+                    self.request.session.headers.update({
+                        "token": loginRes['token']
+                    })
+                    # 签到
+                    self.signin()
                 else:
-                    print('【推送】未填写PushPlus的token，不进行推送')
-                return
+                    # 账号过期，推送消息
+                    if PUSHPLUS_TOKEN:
+                        self.push_message()
+                    else:
+                        print('【推送】未填写PushPlus的token，不进行推送')
+                    return
         else:
             print(f'【APP签到】连续签到天数：{signinRes["sigcount"]}，获得福利点：{signinRes["add"]}点')
 
@@ -345,7 +482,7 @@ class Run:
     def __init__(self):
         self.function = Function()
 
-    def run(self):
+    def do_task(self):
         # 获取APP最新版本
         self.function.get_version()
         # 签到
@@ -357,6 +494,28 @@ class Run:
         # 任务详情
         self.function.task_info()
 
+    def run(self):
+        # 获取APP最新版本
+        self.function.get_version()
+        # 读取token
+        token = self.function.read_token()
+        # 检查token是否过期
+        if token:
+            print('【读取token文件】存在，尝试执行任务')
+            self.function.request.session.headers.update({
+                "token": token
+            })
+            self.do_task()
+        else:
+            print('【读取token文件】不存在，尝试登录')
+            # 登录
+            loginRes = self.function.login()
+            if loginRes:
+                self.function.request.session.headers.update({
+                    "token": loginRes['token']
+                })
+                # 执行任务
+                self.do_task()
 
 if __name__ == '__main__':
     run = Run()
