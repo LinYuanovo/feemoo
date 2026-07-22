@@ -83,7 +83,8 @@ class DdddClient:
         data = self._post("/classification", {"image": to_image_payload(image)})
         if not isinstance(data, dict) or data.get("result") is None:
             raise RuntimeError(f"classification 空结果: {data}")
-        return data["result"]
+        # 服务端可能返回空字符串，交给上层重试/兜底
+        return str(data["result"]).strip()
 
     def detection(self, image) -> list:
         data = self._post("/detection", {"image": to_image_payload(image)})
