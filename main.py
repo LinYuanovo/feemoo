@@ -19,10 +19,14 @@ from cryptography.hazmat.primitives import serialization
 
 fm_account = os.environ.get("fm_account") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
-DDDD_SLIDE_URL = os.environ.get("DDDD_SLIDE_URL") or "" # DDDD滑块验证码识别服务地址
+DDDD_API_BASE = (os.environ.get("DDDD_API_BASE") or "").strip()
+DDDD_SLIDE_URL = (os.environ.get("DDDD_SLIDE_URL") or "").strip()  # 兼容旧变量
+GEETEST_CAPTCHA_ID = (os.environ.get("GEETEST_CAPTCHA_ID") or "36df6e46b1d10baf1858267b6f468a63").strip()
+GEETEST_RISK_TYPE = (os.environ.get("GEETEST_RISK_TYPE") or "slide").strip()
+GEETEST_MAX_RETRY = int(os.environ.get("GEETEST_MAX_RETRY") or "3")
 
-if fm_account == "" or DDDD_SLIDE_URL == "":
-    print("请设置环境变量fm_account和DDDD_SLIDE_URL")
+if fm_account == "" or (DDDD_API_BASE == "" and DDDD_SLIDE_URL == ""):
+    print("请设置环境变量 fm_account 以及 DDDD_API_BASE（或旧版 DDDD_SLIDE_URL）")
     exit(1)
 
 class Utils:
@@ -208,9 +212,8 @@ class Function:
         self.new_version = ""
         self.account = fm_account.split('&')[0]
         self.password = fm_account.split('&')[1]
-        # 添加geetest相关配置
-        self.geetest_captcha_id = "36df6e46b1d10baf1858267b6f468a63"  # 飞猫盘的geetest captcha_id
-        self.geetest_js_url = "https://static.geetest.com/v4/static/v1.8.9-2b7f0f/js/gcaptcha4.js"
+        self.geetest_captcha_id = GEETEST_CAPTCHA_ID
+        self.geetest_risk_type = GEETEST_RISK_TYPE
 
     def get_uid(self):
         uid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
@@ -244,27 +247,22 @@ class Function:
 
     # 获取geetest验证码
     def get_geetest_captcha(self):
-        try:
-            # 导入geetest crack模块
-            import sys
-            import os
-            sys.path.append(os.path.join(os.path.dirname(__file__), 'geetest-v4-slide-crack'))
-            from crack import Crack
-            crack = Crack(self.geetest_captcha_id, self.geetest_js_url, DDDD_SLIDE_URL)
-            crack.load()
-            res = crack.verify()
+        from geeked import Geeked
 
-            if res.get('status') == 'success':
-                if res['data']['result'] == 'success':
-                    return res['data']['seccode']
-                else:
-                    return self.get_geetest_captcha()
-            else:
-                print(f"【geetest验证失败】{res}")
-                return None
-        except Exception as e:
-            print(f"【geetest验证异常】{e}")
-            return None
+        last_err = None
+        for attempt in range(1, GEETEST_MAX_RETRY + 1):
+            try:
+                geeked = Geeked(self.geetest_captcha_id, self.geetest_risk_type)
+                seccode = geeked.solve()
+                if seccode and seccode.get("lot_number") and seccode.get("captcha_output"):
+                    return seccode
+                last_err = seccode
+                print(f"【geetest验证失败】第{attempt}次: {seccode}")
+            except Exception as e:
+                last_err = e
+                print(f"【geetest验证异常】第{attempt}次: {e}")
+        print(f"【geetest验证放弃】已重试{GEETEST_MAX_RETRY}次, last={last_err}")
+        return None
 
     # 登录验证
     def login_verify(self):

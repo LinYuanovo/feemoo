@@ -1,3 +1,4 @@
 cryptography
 pycryptodome
 Requests
+curl_cffi
