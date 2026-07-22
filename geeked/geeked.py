@@ -88,12 +88,9 @@ class Geeked:
 
     def solve(self) -> dict:
         data = self.load_captcha()
-        if self.risk_type == "auto":
-            detected = data.get("captcha_type") or data.get("risk_type")
-            if detected:
-                self.risk_type = detected
-        elif data.get("captcha_type") and data.get("captcha_type") != self.risk_type:
-            # 服务端实际类型与请求不一致时，按服务端为准（飞猫可能随机下发）
-            self.risk_type = data["captcha_type"]
+        detected = data.get("captcha_type") or data.get("risk_type")
+        if detected:
+            # 飞猫 adaptive：load 返回的 captcha_type 才是真实类型
+            self.risk_type = detected
         self.lot_number = data["lot_number"]
         return self.submit_captcha(data)

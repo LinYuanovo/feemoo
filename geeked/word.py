@@ -1,7 +1,11 @@
 from io import BytesIO
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import requests
+
+# 飞猫 word 场景图固定 300x200；userresponse 为相对坐标 * 10000
+SCENE_W = 300
+SCENE_H = 200
 
 
 class WordSolver:
@@ -22,57 +26,75 @@ class WordSolver:
 
     @staticmethod
     def _require_pil():
-        try:
-            from PIL import Image, ImageChops, ImageStat, ImageOps
-            return Image, ImageChops, ImageStat, ImageOps
-        except ImportError as e:
-            raise RuntimeError("word 点选需要 Pillow，请 pip install Pillow") from e
+        from PIL import Image
+        return Image
+
+    @classmethod
+    def _to_white_png(cls, data: bytes, min_side: int = 64) -> bytes:
+        Image = cls._require_pil()
+        im = Image.open(BytesIO(data)).convert("RGBA")
+        bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
+        rgb = Image.alpha_composite(bg, im).convert("RGB")
+        w, h = rgb.size
+        if max(w, h) < min_side:
+            scale = max(2, (min_side + max(w, h) - 1) // max(w, h))
+            rgb = rgb.resize((w * scale, h * scale), Image.Resampling.NEAREST)
+        buf = BytesIO()
+        rgb.save(buf, format="PNG")
+        return buf.getvalue()
 
     @classmethod
     def _open_rgb(cls, data: bytes):
-        Image, _, _, _ = cls._require_pil()
+        Image = cls._require_pil()
         im = Image.open(BytesIO(data)).convert("RGBA")
         bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
         return Image.alpha_composite(bg, im).convert("RGB")
 
-    @classmethod
-    def _glyph_variants(cls, data: bytes) -> list:
-        """生成多种预处理小图，提高匹配/OCR 成功率。"""
-        Image, _, _, ImageOps = cls._require_pil()
-        variants = [data]
-        try:
-            im = Image.open(BytesIO(data)).convert("RGBA")
-            # 白底
-            bg = Image.new("RGBA", im.size, (255, 255, 255, 255))
-            white = Image.alpha_composite(bg, im).convert("RGB")
-            # 黑底
-            bg_b = Image.new("RGBA", im.size, (0, 0, 0, 255))
-            black = Image.alpha_composite(bg_b, im).convert("RGB")
-
-            def pad_center(img, size=128):
-                img = img.convert("RGB")
-                w, h = img.size
-                scale = min((size - 16) / max(w, 1), (size - 16) / max(h, 1), 4.0)
-                scale = max(scale, 1.0)
-                nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-                img = img.resize((nw, nh), Image.Resampling.NEAREST)
-                canvas = Image.new("RGB", (size, size), (255, 255, 255))
-                canvas.paste(img, ((size - nw) // 2, (size - nh) // 2))
-                return canvas
-
-            for base in (white, black, ImageOps.invert(white)):
-                for img in (base, pad_center(base, 128), pad_center(base, 64)):
-                    buf = BytesIO()
-                    img.save(buf, format="PNG")
-                    variants.append(buf.getvalue())
-        except Exception as e:
-            print(f"【word glyph预处理警告】{e}")
-        return variants
-
     @staticmethod
     def _center(bbox) -> list:
         x1, y1, x2, y2 = bbox
-        return [float(x1 + x2) / 2.0, float(y1 + y2) / 2.0]
+        return [(x1 + x2) / 2.0, (y1 + y2) / 2.0]
+
+    @staticmethod
+    def _to_userresponse(pos: list, scene_w: int = SCENE_W, scene_h: int = SCENE_H) -> list:
+        """像素中心 -> 极验 word 提交坐标（相对 * 10000）。"""
+        x, y = pos
+        return [int(round(x / scene_w * 10000)), int(round(y / scene_h * 10000))]
+
+    @staticmethod
+    def _char_sim(a: str, b: str) -> float:
+        a, b = WordSolver._norm_text(a), WordSolver._norm_text(b)
+        if not a or not b:
+            return 0.0
+        if a == b:
+            return 1.0
+        if a in b or b in a:
+            return 0.85
+        sa, sb = set(a), set(b)
+        inter = len(sa & sb)
+        if inter:
+            return 0.5 * inter / max(len(sa), len(sb))
+        return 0.0
+
+    def _ocr_png(self, client, png_bytes: bytes) -> str:
+        try:
+            return self._norm_text(client.classification(png_bytes))
+        except Exception:
+            return ""
+
+    def _ocr_ques(self, client, q_path: str, q_bytes: bytes) -> str:
+        white = self._to_white_png(q_bytes)
+        for payload in (white, q_bytes, f"https://static.geetest.com/{q_path}"):
+            if isinstance(payload, str):
+                try:
+                    text = self._norm_text(client.classification(payload))
+                except Exception:
+                    text = ""
+            else:
+                text = self._ocr_png(client, payload)
+            if text:
+                return text
+        return ""
 
     @staticmethod
     def _iou(a, b) -> float:
@@ -86,274 +108,117 @@ class WordSolver:
         union = area_a + area_b - inter
         return inter / union if union > 0 else 0.0
 
-    @classmethod
-    def _diff_score(cls, crop_rgb, templ_rgb) -> float:
-        """平均像素差，越小越像。"""
-        Image, ImageChops, ImageStat, _ = cls._require_pil()
-        tw, th = templ_rgb.size
-        if tw < 2 or th < 2:
-            return 999.0
-        crop = crop_rgb.resize((tw, th), Image.Resampling.BILINEAR)
-        # 灰度比
-        c = crop.convert("L")
-        t = templ_rgb.convert("L")
-        diff = ImageChops.difference(c, t)
-        mean = ImageStat.Stat(diff).mean[0]
-        # 再试反色模板（部分字黑底白字）
-        from PIL import ImageOps
-        t_inv = ImageOps.invert(t)
-        diff2 = ImageChops.difference(c, t_inv)
-        mean2 = ImageStat.Stat(diff2).mean[0]
-        return min(mean, mean2)
+    def _scene_labeled_boxes(self, client) -> list:
+        scene = self._open_rgb(self.imgs)
+        labeled = []
 
-    def _get_scene_boxes(self, client) -> List[list]:
-        """detection 优先；失败用 select 的 bbox。"""
-        boxes = []
         try:
-            det = client.detection(self.imgs)
-            if det:
-                boxes = [list(map(int, b)) for b in det]
-                print(f"【word detection】{len(boxes)} boxes")
+            raw = client.select(self.imgs)
+            for item in raw or []:
+                if not isinstance(item, dict) or not item:
+                    continue
+                lab, bbox = next(iter(item.items()))
+                lab = self._norm_text(lab)
+                bbox = list(map(int, bbox))
+                if not lab:
+                    crop = scene.crop(tuple(bbox))
+                    buf = BytesIO()
+                    crop.save(buf, format="PNG")
+                    lab = self._ocr_png(client, self._to_white_png(buf.getvalue()))
+                if lab:
+                    labeled.append({"label": lab, "bbox": bbox, "center": self._center(bbox)})
+        except Exception as e:
+            print(f"【word select失败】{e}")
+
+        try:
+            boxes = client.detection(self.imgs) or []
         except Exception as e:
             print(f"【word detection失败】{e}")
+            boxes = []
 
-        if not boxes:
-            try:
-                raw = client.select(self.imgs)
-                for item in raw or []:
-                    if isinstance(item, dict) and item:
-                        bbox = next(iter(item.values()))
-                        boxes.append(list(map(int, bbox)))
-                print(f"【word select boxes】{len(boxes)} boxes")
-            except Exception as e:
-                print(f"【word select失败】{e}")
-        return boxes
+        known = {tuple(x["bbox"]) for x in labeled}
+        for bbox in boxes:
+            bbox = list(map(int, bbox))
+            if tuple(bbox) in known:
+                continue
+            if any(self._iou(bbox, x["bbox"]) > 0.5 for x in labeled):
+                continue
+            crop = scene.crop(tuple(bbox))
+            buf = BytesIO()
+            crop.save(buf, format="PNG")
+            lab = self._ocr_png(client, buf.getvalue())
+            if not lab:
+                lab = self._ocr_png(client, self._to_white_png(buf.getvalue()))
+            if lab:
+                labeled.append({"label": lab, "bbox": bbox, "center": self._center(bbox)})
 
-    def _match_ques_to_boxes(
-        self, scene_rgb, glyph_bytes_list: List[bytes], boxes: List[list]
-    ) -> Optional[List[List[float]]]:
-        if not boxes or len(boxes) < len(glyph_bytes_list):
-            print(f"【word框不足】boxes={len(boxes)}, ques={len(glyph_bytes_list)}")
-            # 框少时仍尝试匹配
-            if not boxes:
-                return None
+        print(f"【word场景字】{[(x['label'], x['center']) for x in labeled]}")
+        return labeled
 
-        glyphs = []
-        for gb in glyph_bytes_list:
-            try:
-                glyphs.append(self._open_rgb(gb))
-            except Exception as e:
-                print(f"【word打开ques失败】{e}")
-                return None
-
-        used = set()
-        results = []
-        scores = []
-        for gi, glyph in enumerate(glyphs):
-            best_i, best_score = None, 1e9
-            for bi, bbox in enumerate(boxes):
-                if bi in used:
-                    continue
-                x1, y1, x2, y2 = bbox
-                if x2 <= x1 or y2 <= y1:
-                    continue
-                crop = scene_rgb.crop((x1, y1, x2, y2))
-                sc = self._diff_score(crop, glyph)
-                if sc < best_score:
-                    best_score, best_i = sc, bi
-            if best_i is None:
-                print(f"【word框匹配失败】ques_index={gi}")
-                return None
-            # 经验阈值：平均差 > 90 基本不像
-            if best_score > 95:
-                print(f"【word框匹配分过高】ques_index={gi}, score={best_score:.1f}")
-                return None
-            used.add(best_i)
-            scores.append(round(best_score, 2))
-            results.append(self._center(boxes[best_i]))
-
-        print(f"【word框模板匹配】scores={scores}, positions={results}")
-        return results
-
-    def _full_scene_template(
-        self, scene_rgb, glyph_bytes_list: List[bytes]
-    ) -> Optional[List[List[float]]]:
-        Image, ImageChops, ImageStat, _ = self._require_pil()
-        scene_l = scene_rgb.convert("L")
-        sw, sh = scene_l.size
-        # 降采样加速
-        scale = 1.0
-        if max(sw, sh) > 320:
-            scale = 320 / max(sw, sh)
-            scene_s = scene_l.resize(
-                (max(1, int(sw * scale)), max(1, int(sh * scale))),
-                Image.Resampling.BILINEAR,
-            )
-        else:
-            scene_s = scene_l
-
-        ssw, ssh = scene_s.size
-        used_rects = []
-        results = []
-        scores = []
-        step = 3
-
-        for gb in glyph_bytes_list:
-            glyph = self._open_rgb(gb).convert("L")
-            tw0, th0 = glyph.size
-            best = None  # score, cx, cy, rect_orig
-            for sc in (1.0, 0.8, 1.2, 0.65, 1.4):
-                tw = max(6, int(tw0 * sc * scale))
-                th = max(6, int(th0 * sc * scale))
-                if tw >= ssw or th >= ssh:
-                    continue
-                t = glyph.resize((tw, th), Image.Resampling.BILINEAR)
-                for y in range(0, ssh - th + 1, step):
-                    for x in range(0, ssw - tw + 1, step):
-                        rect = (x, y, x + tw, y + th)
-                        # 跳过重叠
-                        skip = False
-                        for ur in used_rects:
-                            if self._iou(rect, ur) > 0.3:
-                                skip = True
-                                break
-                        if skip:
-                            continue
-                        crop = scene_s.crop(rect)
-                        diff = ImageChops.difference(crop, t)
-                        mean = ImageStat.Stat(diff).mean[0]
-                        if best is None or mean < best[0]:
-                            # 还原原图坐标
-                            cx = (x + tw / 2) / scale
-                            cy = (y + th / 2) / scale
-                            rect_o = (
-                                x / scale,
-                                y / scale,
-                                (x + tw) / scale,
-                                (y + th) / scale,
-                            )
-                            best = (mean, cx, cy, rect_o)
-            if best is None or best[0] > 70:
-                print(f"【word全图模板失败】best={best}")
-                return None
-            scores.append(round(best[0], 2))
-            results.append([best[1], best[2]])
-            used_rects.append(best[3])
-
-        print(f"【word全图模板匹配】scores={scores}, positions={results}")
-        return results
-
-    def _ocr_glyph(self, client, q_path: str, q_bytes: bytes) -> str:
-        url = f"https://static.geetest.com/{q_path}"
-        for payload in [url] + self._glyph_variants(q_bytes):
-            try:
-                text = self._norm_text(client.classification(payload))
-                if text:
-                    return text
-            except Exception:
-                pass
-            try:
-                items = client.select(payload)
-                if isinstance(items, list) and items:
-                    for item in items:
-                        if isinstance(item, dict) and item:
-                            lab = self._norm_text(next(iter(item.keys())))
-                            if lab:
-                                return lab
-            except Exception:
-                pass
-        return ""
-
-    def _solve_by_ocr(self, client, scene_rgb, glyph_bytes_list, boxes) -> List[List[float]]:
-        targets = []
-        for q, qb in zip(self.ques, glyph_bytes_list):
-            targets.append(self._ocr_glyph(client, q, qb))
-        print(f"【word ques OCR】{targets}")
-
-        if not any(targets):
-            raise RuntimeError(
-                f"ques OCR 全空（请确认远程 /classification 对小图可用，或依赖模板匹配）。"
-                f" ques={self.ques}"
-            )
-
-        labeled = []
-        if boxes:
-            for bbox in boxes:
-                x1, y1, x2, y2 = bbox
-                crop = scene_rgb.crop((x1, y1, x2, y2))
-                buf = BytesIO()
-                crop.save(buf, format="PNG")
-                try:
-                    lab = self._norm_text(client.classification(buf.getvalue()))
-                except Exception:
-                    lab = ""
-                if lab:
-                    labeled.append({"label": lab, "bbox": bbox})
-
-        if not labeled:
-            try:
-                raw = client.select(self.imgs)
-                for item in raw or []:
-                    if isinstance(item, dict) and item:
-                        k, v = next(iter(item.items()))
-                        k = self._norm_text(k)
-                        if k:
-                            labeled.append({"label": k, "bbox": list(map(int, v))})
-            except Exception as e:
-                print(f"【word select OCR失败】{e}")
-
-        used = set()
-        results = []
-        for t in targets:
-            t = self._norm_text(t)
-            if not t:
-                raise RuntimeError(f"ques OCR 不完整: {targets}")
-            hit = None
-            for i, det in enumerate(labeled):
-                if i in used:
-                    continue
-                lab = det["label"]
-                if lab == t or t in lab or lab in t:
-                    used.add(i)
-                    hit = self._center(det["bbox"])
-                    break
-            if hit is None:
-                raise RuntimeError(
-                    f"word 匹配失败: target={t!r}, targets={targets}, labeled={labeled}"
+    def _assign(self, targets: List[str], labeled: list) -> Optional[List[list]]:
+        n, m = len(targets), len(labeled)
+        if m < 1:
+            return None
+        pairs = []
+        for ti, t in enumerate(targets):
+            for li, lab in enumerate(labeled):
+                s = self._char_sim(t, lab["label"])
+                if s > 0:
+                    pairs.append((s, ti, li))
+        pairs.sort(reverse=True)
+        used_t, used_l = set(), set()
+        result_map = {}
+        for s, ti, li in pairs:
+            if ti in used_t or li in used_l:
+                continue
+            # 精确优先：若还有精确匹配未用，不要用低分占位
+            if s < 1.0:
+                # 检查该 target 是否还有精确候选
+                has_exact = any(
+                    self._char_sim(targets[ti], labeled[j]["label"]) >= 1.0 and j not in used_l
+                    for j in range(m)
                 )
-            results.append(hit)
-        print(f"【word OCR匹配】positions={results}")
-        return results
+                if has_exact and s < 0.85:
+                    continue
+            used_t.add(ti)
+            used_l.add(li)
+            result_map[ti] = labeled[li]["center"]
+            if len(used_t) == n:
+                break
+        if len(result_map) != n:
+            return None
+        return [result_map[i] for i in range(n)]
 
     def find_word_positions(self) -> List[List[float]]:
         from geeked.dddd_client import get_dddd_client
 
         self._require_pil()
         client = get_dddd_client()
-        scene_rgb = self._open_rgb(self.imgs)
-        print(f"【word】scene_size={scene_rgb.size}, ques_n={len(self.ques)}")
 
-        glyph_bytes_list = []
+        # 实际场景尺寸（一般 300x200）
+        scene = self._open_rgb(self.imgs)
+        scene_w, scene_h = scene.size
+
+        targets = []
         for q in self.ques:
-            glyph_bytes_list.append(self.load_image(f"https://static.geetest.com/{q}"))
+            qb = self.load_image(f"https://static.geetest.com/{q}")
+            t = self._ocr_ques(client, q, qb)
+            targets.append(t)
+        print(f"【word目标字】{targets}")
+        if not all(targets):
+            raise RuntimeError(f"ques OCR 不完整: {targets}")
 
-        boxes = self._get_scene_boxes(client)
+        labeled = self._scene_labeled_boxes(client)
+        if not labeled:
+            raise RuntimeError("场景未检出任何文字框")
 
-        # 1) detection/select 框 × ques 模板比对（主路径，不依赖识字）
-        try:
-            pos = self._match_ques_to_boxes(scene_rgb, glyph_bytes_list, boxes)
-            if pos and len(pos) == len(self.ques):
-                return pos
-        except Exception as e:
-            print(f"【word框模板异常】{e}")
+        positions = self._assign(targets, labeled)
+        if not positions:
+            raise RuntimeError(
+                f"word 匹配失败: targets={targets}, labeled={[x['label'] for x in labeled]}"
+            )
 
-        # 2) 全图滑窗模板
-        try:
-            pos = self._full_scene_template(scene_rgb, glyph_bytes_list)
-            if pos and len(pos) == len(self.ques):
-                return pos
-        except Exception as e:
-            print(f"【word全图模板异常】{e}")
-
-        # 3) OCR 兜底
-        return self._solve_by_ocr(client, scene_rgb, glyph_bytes_list, boxes)
+        userresponse = [self._to_userresponse(p, scene_w, scene_h) for p in positions]
+        print(f"【word像素中心】{positions}")
+        print(f"【word点击坐标】{userresponse}")
+        return userresponse
