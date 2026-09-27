@@ -45,23 +45,15 @@ git clone -b dev https://github.com/LinYuanovo/feemoo.git
 pip install -r requirements.txt
 ```
 
-3. 准备密钥文件（均为本地文件，已被 .gitignore 排除，不会误提交）
+3. 准备一个远程 ddddocr 识别服务（用于极验 v4 滑块），地址填入环境变量 `DDDD_API_BASE`。
 
-```shell
-# APP 密钥 app_keys.json：由仓库自带的 p.txt / pfile.txt / sfile.txt 合成
-python -c "import json; print(json.dumps({k: open(k + '.txt', encoding='utf-8').read() for k in ('p', 'pfile', 'sfile')}, ensure_ascii=False))" > app_keys.json
-
-# 小程序密钥 mini_keys.json：从 main 分支获取
-git show origin/main:mini_keys.json > mini_keys.json
-```
-
-4. 准备一个远程 ddddocr 识别服务（用于极验 v4 滑块），将其地址填入环境变量 `DDDD_API_BASE`。
-
-5. 配置环境变量（详见下一节），至少需要 `fm_account` 与 `DDDD_API_BASE`，然后运行：
+4. 配置环境变量（详见下一节），至少需要 `fm_account` 与 `DDDD_API_BASE`，然后运行：
 
 ```shell
 python main.py
 ```
+
+密钥文件已随仓库提供：`app_keys.json`（APP 协议）与 `mini_keys.json`（微信小程序协议），两者不是同一套、不可混用，无需任何手动准备。
 
 首次运行会走「登录 → 过滑块 → 缓存 token 到 sessions.json」，之后每天直接使用缓存 token，失效时自动重新登录。推荐使用青龙面板或 crontab 定时运行。
 
@@ -96,16 +88,13 @@ python main.py
 filetree
 │
 ├── geeked/             极验 v4 滑块处理（轨迹、签名、缺口识别，识别走远程 ddddocr）
-├── p.txt               密钥
-├── pfile.txt           RSA公钥文件
-├── sfile.txt           RSA私钥文件
+├── app_keys.json       APP 协议密钥
+├── mini_keys.json      微信小程序协议密钥（与 APP 密钥不是同一套，禁止混用）
 ├── requirements.txt    依赖文件
 ├── main.py             主程序
 └── README.md
 
-本地生成/运行时文件（已被 .gitignore 排除）：
-├── app_keys.json       APP 密钥（由 p/pfile/sfile.txt 合成，见上手指南）
-├── mini_keys.json      微信小程序密钥（来自 main 分支）
+本地运行时文件（已被 .gitignore 排除，不会误提交）：
 ├── sessions.json       多账号 token / 设备缓存
 └── device.txt 等       历史遗留凭据文件（自动迁移进 sessions.json）
 ```

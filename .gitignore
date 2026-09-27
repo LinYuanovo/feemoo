@@ -30,8 +30,6 @@ feemoo_pc_dl.py
 
 # --- Secrets & runtime data (NEVER commit) ---
 sessions.json
-app_keys.json
-mini_keys.json
 device.txt
 fm_token.txt
 pc_token.txt
