@@ -24,8 +24,9 @@ fm_pto = os.environ.get("fm_pto") or ""
 fm_par = os.environ.get("fm_par") or ""
 PUSHPLUS_TOKEN = os.environ.get("PUSHPLUS_TOKEN") or ""
 
-# 微信小程序看视频链路（2026-09 起 APP 广告奖励迁移至微信小程序任务）
-MINI_KEYS_FILE = "mini_keys.json"
+# 密钥文件（协议常量，随仓库提供；两套密钥不通用，禁止混用）
+APP_KEYS_FILE = "app_keys.json"     # APP 链路
+MINI_KEYS_FILE = "mini_keys.json"   # 微信小程序看视频链路
 FM_API_BASE_MINI = "https://fmpapi.feemoo.com"
 
 if fm_token is None:
@@ -37,17 +38,8 @@ class Utils:
     def __init__(self, keys_file=None):
         self.bits = 2048
         self.key_pair = RSA.generate(self.bits)
-        if keys_file:
-            # 合并密钥 JSON（p / pfile / sfile），小程序链路使用 mini_keys.json
-            with open(keys_file, 'r', encoding='utf-8') as f:
-                keys = json.load(f)
-            self.pfile = keys["pfile"]
-            self.sfile = keys["sfile"]
-            self.p = keys["p"]
-        else:
-            self.pfile = self.read_file("pfile.txt")
-            self.sfile = self.read_file("sfile.txt")
-            self.p = self.read_file("p.txt")
+        # 合并密钥 JSON（p / pfile / sfile）：APP 用 app_keys.json，小程序用 mini_keys.json
+        self.pfile, self.sfile, self.p = self.load_keys(keys_file or APP_KEYS_FILE)
         self.ak = self.genak()
         self.ed = self.re(self.ak, self.pfile)
         # self.pto = self.re(self.ak, self.p)
@@ -57,10 +49,20 @@ class Utils:
         self.pto = fm_pto
         self.par = fm_par
 
-    # 读取文件
-    def read_file(self, file_name):
-        with open(file_name, 'r') as f:
-            return f.read()
+    # 读取密钥 JSON
+    @staticmethod
+    def load_keys(keys_file):
+        if not os.path.exists(keys_file):
+            raise FileNotFoundError(
+                f"密钥文件不存在: {keys_file}。"
+                f"APP 用 {APP_KEYS_FILE}，小程序用 {MINI_KEYS_FILE}（均随仓库提供）"
+            )
+        with open(keys_file, 'r', encoding='utf-8') as f:
+            keys = json.load(f)
+        for k in ("p", "pfile", "sfile"):
+            if not keys.get(k):
+                raise ValueError(f"{keys_file} 缺少字段: {k}")
+        return keys["pfile"], keys["sfile"], keys["p"]
 
     # 生成参数
     def in_parameter(self, data):

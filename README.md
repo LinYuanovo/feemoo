@@ -88,10 +88,8 @@ python main.py
 ```
 filetree
 │
-├── p.txt               密钥
-├── pfile.txt           RSA公钥文件
-├── sfile.txt           RSA私钥文件
-├── mini_keys.json      微信小程序密钥（看视频链路用，与 APP 密钥不通用）
+├── app_keys.json       APP 协议密钥
+├── mini_keys.json      微信小程序协议密钥（看视频链路用，与 APP 密钥不通用）
 ├── requirements.txt    依赖文件
 ├── main.py             主程序
 └── README.md
