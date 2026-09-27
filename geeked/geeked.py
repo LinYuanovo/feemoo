@@ -82,9 +82,13 @@ class Geeked:
         }
         res = self.session.get(f"{self.base_url}/verify", params=params).text
         res = self.format_response(res)
-        if res.get("seccode") is None:
+        seccode = res.get("seccode")
+        if seccode is None:
             raise Exception(f"Failed to submit captcha: {res}")
-        return res["seccode"]
+        if isinstance(seccode, dict):
+            seccode.setdefault("accessid", res.get("accessid", ""))
+            return seccode
+        return seccode
 
     def solve(self) -> dict:
         data = self.load_captcha()
