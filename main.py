@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import random
+import re
 import string
 import os
 import time
@@ -146,9 +147,19 @@ class Request:
             "Content-Type": "application/x-www-form-urlencoded",
             "token": fm_token,
             "Host": "fmpapi.feimaoyun.com",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0",
+            # 2026-09-07 起服务端在鉴权前校验 APP 原生请求头，缺失即返回
+            # 40100「设备错误，请重试」。以下头集合为 v4.00.74 原生 okhttp 实抓值：
+            # devicetoken 与机型字符串实测不与账号绑定（占位即可），par/pto 仍用抓包值。
+            "User-Agent": "FeemooApp/Android15 v4.00.74/Xiaomi 22061218C",
             "os": "android",
-            "fmver": "116",
+            "device-name": "Xiaomi++22061218C",
+            "app-ver": "4.00.74",
+            "network-type": "WiFi",
+            "os-ver": "Android+15",
+            "fmver": "170",
+            "plat": "feemoo",
+            "devicetoken": "0000000000000000000",
+            "fm-lang": "zh-CN",
             "par": self.utils.par,
             "pto": self.utils.pto,
         })
@@ -218,6 +229,13 @@ class Function:
         self.request.session.headers.update({
             "fmver": server_version,
         })
+        # app-ver / User-Agent 的版本号同步为服务端最新版本，避免日后 APP 升级后
+        # 头校验收紧再次出现 40100（new_version 形如 "V4.00.74"）
+        new_version = str(getVersionRes.get('new_version') or '').lstrip('Vv')
+        if new_version:
+            headers = self.request.session.headers
+            headers['app-ver'] = new_version
+            headers['User-Agent'] = re.sub(r'v[\d.]+/', 'v%s/' % new_version, headers['User-Agent'])
 
     # 获取用户信息
     def get_user_info(self):
