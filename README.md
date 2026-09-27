@@ -7,6 +7,12 @@
 > 40100「设备错误，请重试」。请更新到最新 main.py，**原来抓的 fm_token / fm_par / fm_pto 仍然有效，
 > 无需重新抓包**（par/pto 是设备长期凭据，实测 2026-08 抓取的值至今可用）。
 
+> **📺 看视频链路迁移说明**：飞猫盘的看广告奖励已迁移到微信小程序任务，旧的 `abTaskInfo` +
+> 穿山甲回调链路（`watch_ad`）不再下发奖励，已停用（代码保留备查）。当前 `main.py` 改为走
+> 微信小程序链路：`taskInfoV2` 自动获取 jumpToken → `getAppTaskInfo`/`appletTaskInfo`
+> → `appletTaskCallback` 领取福利点。**仍然复用抓包的 fm_token，无需重新抓包、无需登录/OCR。**
+> 小程序链路使用独立密钥文件 `mini_keys.json`（随仓库提供，与 APP 密钥不通用）。
+
 ## 目录
 
 - [效果展示](#效果展示)
@@ -64,6 +70,7 @@ filetree
 ├── p.txt               密钥
 ├── pfile.txt           RSA公钥文件
 ├── sfile.txt           RSA私钥文件
+├── mini_keys.json      微信小程序密钥（看视频链路用，与 APP 密钥不通用）
 ├── requirements.txt    依赖文件
 ├── main.py             主程序
 └── README.md
