@@ -1,6 +1,40 @@
+# --- Python ---
 __pycache__/
 *.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- IDE / tooling ---
 .idea/
+.codegraph/
+
+# --- Docs & decompiled artifacts (large / regenerable) ---
 docs/
+base-apk.json
+tools/*.apk
+
+# --- Logs ---
+logs/
+*.log
+
+# --- Scratch output ---
+downloads/
+test/*_result.txt
+
+# --- Local experiments (不随仓库分发) ---
+feemoo_dl.py
+feemoo_pc_dl.py
+/test/
+/tools/
+
+# --- Secrets & runtime data (NEVER commit) ---
+sessions.json
+app_keys.json
+mini_keys.json
 device.txt
 fm_token.txt
+pc_token.txt
+*_mini.txt
+*jump_token*.txt
+mini_token.txt
