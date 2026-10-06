@@ -3,3 +3,6 @@ pycryptodome
 Requests
 curl_cffi
 Pillow
+ddddocr
+opencv-python
+numpy

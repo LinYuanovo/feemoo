@@ -7,7 +7,7 @@
 | | main 分支 | dev 分支（本分支） |
 |---|---|---|
 | 凭据来源 | 手动抓包三件套（fm_token / fm_par / fm_pto） | **账号密码自动登录**，无需抓包 |
-| 登录验证 | 无 | 极验 v4 滑块（远程 ddddocr 服务识别） |
+| 登录验证 | 无 | 极验 v4 滑块（远程 ddddocr 服务识别，或 `DDDD_MODE=local` 本地识别） |
 | 多账号 | 单账号 | 支持（`fm_account` 多组） |
 | token 管理 | 手动更新环境变量 | `sessions.json` 自动缓存、失效自动重登 |
 
@@ -45,13 +45,17 @@ git clone -b dev https://github.com/LinYuanovo/feemoo.git
 pip install -r requirements.txt
 ```
 
-3. 准备一个远程 ddddocr 识别服务（用于极验 v4 滑块），地址填入环境变量 `DDDD_API_BASE`。
+3. 准备验证码识别：二选一。
+   - 远程 ddddocr 识别服务（推荐，识别率更高），地址填入环境变量 `DDDD_API_BASE`；
+   - 或本地识别：`pip install ddddocr opencv-python` 后设置 `DDDD_MODE=local`，无需任何服务。
 
-4. 配置环境变量（详见下一节），至少需要 `fm_account` 与 `DDDD_API_BASE`，然后运行：
+4. 配置环境变量（详见下一节），至少需要 `fm_account` 与 `DDDD_API_BASE`（或 `DDDD_MODE=local`），然后运行：
 
 ```shell
 python main.py
 ```
+
+也可用命令行参数临时指定识别模式（优先级高于环境变量 `DDDD_MODE`）：`python main.py --dddd-mode local`。
 
 密钥文件已随仓库提供：`app_keys.json`（APP 协议）与 `mini_keys.json`（微信小程序协议），两者不是同一套、不可混用，无需任何手动准备。
 
@@ -64,7 +68,7 @@ python main.py
 | 变量 | 说明 |
 |---|---|
 | `fm_account` | 账号密码，格式 `user&password`；多账号用换行或 `@` 分隔，如 `user1&pass1@user2&pass2` |
-| `DDDD_API_BASE` | 远程 ddddocr 服务地址（滑块/点选识别），兼容旧变量 `DDDD_SLIDE_URL` |
+| `DDDD_API_BASE` | 远程 ddddocr 服务地址（滑块/点选识别），兼容旧变量 `DDDD_SLIDE_URL`；改用本地识别时可不填 |
 
 **可选**
 
@@ -73,7 +77,8 @@ python main.py
 | `PUSHPLUS_TOKEN` | [pushplus](https://www.pushplus.plus/) 的 token，账号异常时推送提醒 |
 | `GEETEST_CAPTCHA_ID` | 极验 captcha_id，默认已内置，一般无需修改 |
 | `GEETEST_RISK_TYPE` | 极验验证类型，默认 `slide` |
-| `GEETEST_MAX_RETRY` | 滑块失败重试次数，默认 `3` |
+| `GEETEST_MAX_RETRY` | 滑块失败重试次数，默认 `3`（本地识别模式下自动 ×3） |
+| `DDDD_MODE` | 识别模式：`auto`（默认，配了 `DDDD_API_BASE` 走云端，否则本地 ddddocr）/ `cloud` / `local` |
 | `GEETEST_HTTP` | geeked 的 HTTP 后端选择（调试用） |
 | `FM_WATCH_DELAY` | 模拟看视频等待秒数，如 `15-20`（默认）/ `15` / `20-30` |
 | `FM_APP_AD_MAX` | 单轮看视频最大领取次数，不设或 `0` 为不限制 |
@@ -87,7 +92,7 @@ python main.py
 ```
 filetree
 │
-├── geeked/             极验 v4 滑块处理（轨迹、签名、缺口识别，识别走远程 ddddocr）
+├── geeked/             极验 v4 滑块处理（轨迹、签名、缺口识别；识别走远程 ddddocr 或本地 ddddocr）
 ├── app_keys.json       APP 协议密钥
 ├── mini_keys.json      微信小程序协议密钥（与 APP 密钥不是同一套，禁止混用）
 ├── requirements.txt    依赖文件
@@ -101,8 +106,8 @@ filetree
 
 ### 常见问题
 
-- **提示「请设置环境变量 fm_account ...」**：`fm_account` 或 `DDDD_API_BASE` 未配置，两者均为必填。
-- **滑块一直失败**：检查 `DDDD_API_BASE` 服务是否可用；可通过 `GEETEST_MAX_RETRY` 增加重试次数。
+- **提示「请设置环境变量 fm_account ...」**：`fm_account` 未配置，且既没有 `DDDD_API_BASE` 也没有可用的本地 ddddocr（`DDDD_MODE=local` 需先 `pip install ddddocr`）。
+- **滑块一直失败**：云端模式检查 `DDDD_API_BASE` 服务是否可用；本地模式点选字识别率较低属正常，脚本会自动多次重试，也可通过 `GEETEST_MAX_RETRY` 增加基础重试次数。
 - **看视频提示「今日已获得所有奖励」**：正常现象，当日额度已用完，次日自动恢复。
 - **看视频提示「未拿到 video_ad_task_token」**：常见原因为今日次数已满或福利开关关闭。
 - **账号过期**：脚本会自动尝试重新登录；若配置了 `PUSHPLUS_TOKEN` 会推送提醒。

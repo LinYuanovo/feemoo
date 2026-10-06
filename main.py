@@ -74,11 +74,17 @@ def parse_accounts(raw: str) -> list:
 
 
 def _require_runtime_env():
+    from geeked.dddd_client import local_available, resolve_mode
+
     accounts = parse_accounts(fm_account)
-    if not accounts or (DDDD_API_BASE == "" and DDDD_SLIDE_URL == ""):
+    ocr_ready = bool(DDDD_API_BASE or DDDD_SLIDE_URL) or (
+        resolve_mode() == "local" and local_available()
+    )
+    if not accounts or not ocr_ready:
         print(
             "请设置环境变量 fm_account（支持多账号：换行或 @ 分隔，每项 user&password）"
-            " 以及 DDDD_API_BASE（或旧版 DDDD_SLIDE_URL）"
+            " 以及 DDDD_API_BASE（或旧版 DDDD_SLIDE_URL）；"
+            " 也可安装 ddddocr 后用 DDDD_MODE=local 走本地识别"
         )
         raise SystemExit(1)
     return accounts
@@ -503,9 +509,12 @@ class Function:
     # 获取geetest验证码
     def get_geetest_captcha(self):
         from geeked import Geeked
+        from geeked.dddd_client import resolve_mode
 
+        # 本地 ddddocr 对点选字的识别率低于云端服务，用更多重试补齐成功率
+        attempts = GEETEST_MAX_RETRY * (3 if resolve_mode() == "local" else 1)
         last_err = None
-        for attempt in range(1, GEETEST_MAX_RETRY + 1):
+        for attempt in range(1, attempts + 1):
             try:
                 geeked = Geeked(self.geetest_captcha_id, self.geetest_risk_type)
                 seccode = geeked.solve()
@@ -516,7 +525,7 @@ class Function:
             except Exception as e:
                 last_err = e
                 print(f"【geetest验证异常】第{attempt}次: {e}")
-        print(f"【geetest验证放弃】已重试{GEETEST_MAX_RETRY}次, last={last_err}")
+        print(f"【geetest验证放弃】已重试{attempts}次, last={last_err}")
         return None
 
     # 登录验证
@@ -1071,6 +1080,18 @@ class Run:
                 time.sleep(1)
 
 if __name__ == '__main__':
+    import argparse
+
+    parser = argparse.ArgumentParser(description="feemoo 自动任务")
+    parser.add_argument(
+        "--dddd-mode",
+        choices=("auto", "cloud", "local"),
+        default=None,
+        help="验证码识别模式：auto（默认）/ cloud（远程 DDDD_API_BASE）/ local（本地 ddddocr）",
+    )
+    cli_args = parser.parse_args()
+    if cli_args.dddd_mode:
+        os.environ["DDDD_MODE"] = cli_args.dddd_mode
     _accounts = _require_runtime_env()
     run = Run(accounts=_accounts)
     run.run()

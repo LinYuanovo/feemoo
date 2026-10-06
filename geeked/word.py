@@ -125,6 +125,205 @@ class WordSolver:
         except Exception:
             return ""
 
+    def _ques_glyph(self, q_bytes: bytes):
+        import numpy as np
+
+        Image = self._pil()
+        alpha = Image.open(BytesIO(q_bytes)).convert("RGBA").split()[-1]
+        a = np.array(alpha)
+        ys, xs = np.where(a > 40)
+        if not len(xs):
+            return None
+        m = (a > 40).astype(np.uint8)
+        return m[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+
+    def _local_box_label(self, client, png_bytes: bytes, targets: List[str]) -> str:
+        votes = client.classification_votes(png_bytes)
+        for target in targets:
+            for vote in votes:
+                if self._char_sim(target, vote) >= 0.85:
+                    return vote
+        for vote in votes:
+            if len(self._cjk_chars(vote)) == 1:
+                return vote
+        return votes[0] if votes else ""
+
+    def _local_labeled_boxes(self, client, targets: List[str]) -> list:
+        scene = self._open_rgb(self.imgs)
+        labeled = []
+        for bbox in client.detection(self.imgs):
+            bbox = list(map(int, bbox))
+            buf = BytesIO()
+            scene.crop(tuple(bbox)).save(buf, format="PNG")
+            label = self._local_box_label(client, buf.getvalue(), targets)
+            labeled.append({"label": label, "bbox": bbox, "center": self._center(bbox)})
+        print(f"【word场景字】{[(x['label'], x['center']) for x in labeled]}")
+        return labeled
+
+    def _local_grad(self):
+        import cv2
+        import numpy as np
+
+        arr = np.array(self._open_rgb(self.imgs), dtype=np.float32)
+        grad = np.zeros(arr.shape[:2], np.float32)
+        for ch in range(arr.shape[2]):
+            gx = cv2.Sobel(arr[:, :, ch], cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(arr[:, :, ch], cv2.CV_32F, 0, 1, ksize=3)
+            grad += cv2.magnitude(gx, gy)
+        return cv2.GaussianBlur(grad, (3, 3), 0)
+
+    def _local_glyph_candidates(self, client, targets: List[str], labeled: list) -> list:
+        """本地兜底：用 ques 字形做轮廓环梯度模板匹配，直接定位目标字。"""
+        import cv2
+        import numpy as np
+        from PIL import Image as PILImage
+
+        grad = self._local_grad()
+        scene = self._open_rgb(self.imgs)
+        height, width = grad.shape
+        k3 = np.ones((3, 3), np.uint8)
+        k5 = np.ones((5, 5), np.uint8)
+        candidates = list(labeled)
+        matched = [
+            ti for ti, t in enumerate(targets)
+            if any(x["label"] and self._char_sim(t, x["label"]) >= 0.85 for x in labeled)
+        ]
+        blocked = [
+            list(x["center"]) for x in labeled
+            if x["label"] and any(self._char_sim(t, x["label"]) >= 0.85 for t in targets)
+        ]
+
+        def masks(glyph, angle, scale, box_w, box_h):
+            rim = PILImage.fromarray(glyph * 255)
+            if angle:
+                rim = rim.rotate(angle, expand=True, fillcolor=0, resample=PILImage.BILINEAR)
+            g = (np.array(rim) > 127).astype(np.uint8)
+            gw = int(g.shape[1] * scale)
+            gh = int(g.shape[0] * scale)
+            if gw >= box_w or gh >= box_h or gw < 10 or gh < 10:
+                return None
+            g2 = (np.array(
+                PILImage.fromarray(g * 255).resize((gw, gh), PILImage.LANCZOS)
+            ) > 127).astype(np.uint8)
+            canvas = np.zeros((box_h, box_w), np.uint8)
+            x0, y0 = (box_w - gw) // 2, (box_h - gh) // 2
+            canvas[y0:y0 + gh, x0:x0 + gw] = g2
+            inside = cv2.erode(canvas, k3)
+            ring = cv2.dilate(canvas, k5) - cv2.dilate(canvas, k3)
+            area_in, area_ring = int(inside.sum()), int(ring.sum())
+            if area_in < 30 or area_ring < 20:
+                return None
+            return inside, ring, area_in, area_ring, gw, gh
+
+        def ring_best(sub_grad, glyph):
+            best = 0.0
+            for angle in range(-40, 41, 5):
+                for scale in (0.65, 0.75, 0.85, 0.95, 1.05):
+                    m = masks(glyph, angle, scale, sub_grad.shape[1], sub_grad.shape[0])
+                    if not m:
+                        continue
+                    inside, ring, area_in, area_ring, _, _ = m
+                    s = (
+                        (sub_grad * ring).sum() / area_ring
+                        - (sub_grad * inside).sum() / area_in
+                    )
+                    best = max(best, float(s))
+            return best
+
+        # 阶段1：未匹配目标字 vs 未匹配检测框，逐框环梯度打分后贪心配对
+        free_boxes = [
+            x for x in labeled
+            if not (x["label"] and any(self._char_sim(t, x["label"]) >= 0.85 for t in targets))
+        ]
+        unmatched = [ti for ti in range(len(targets)) if ti not in matched]
+        pairs = []
+        for ti in unmatched:
+            glyph = self._ques_glyph(self._ques_bytes[ti])
+            if glyph is None:
+                continue
+            for fi, box in enumerate(free_boxes):
+                x1, y1, x2, y2 = map(int, box["bbox"])
+                score = ring_best(grad[y1:y2, x1:x2], glyph)
+                if score >= 15:
+                    pairs.append((score, ti, fi))
+        pairs.sort(key=lambda item: -item[0])
+        ranked = {}
+        for score, ti, fi in pairs:
+            ranked.setdefault(ti, []).append(score)
+        pairs = [
+            (s, ti, fi) for s, ti, fi in pairs
+            if s >= max(15.0, 1.2 * (ranked[ti][1] if len(ranked[ti]) > 1 else 0.0))
+        ]
+        used_t, used_f = set(), set()
+        for score, ti, fi in pairs:
+            if ti in used_t or fi in used_f:
+                continue
+            used_t.add(ti)
+            used_f.add(fi)
+            box = free_boxes[fi]
+            candidates.append({
+                "label": targets[ti],
+                "bbox": list(map(int, box["bbox"])),
+                "center": list(box["center"]),
+            })
+            print(
+                f"【word框字形候选】{targets[ti]} score={score:.1f} "
+                f"center={[round(v, 1) for v in box['center']]}"
+            )
+
+        # 阶段2：仍未匹配的目标字，整图环梯度模板匹配
+        def peak(score):
+            score[:8, :] = -1.0
+            score[-8:, :] = -1.0
+            score[:, :8] = -1.0
+            score[:, -8:] = -1.0
+            for _ in range(4):
+                _, mx, _, (mx_x, mx_y) = cv2.minMaxLoc(score)
+                center = [mx_x + 0.5, mx_y + 0.5]
+                if not any(np.hypot(center[0] - p[0], center[1] - p[1]) < 20 for p in blocked):
+                    return float(mx), center
+                cv2.circle(score, (mx_x, mx_y), 20, -1.0, -1)
+            return 0.0, None
+
+        for ti, target in enumerate(targets):
+            if ti in matched or ti in used_t:
+                continue
+            glyph = self._ques_glyph(self._ques_bytes[ti])
+            if glyph is None:
+                continue
+            best = (0.0, None, None)
+            for angle in range(-40, 41, 5):
+                for scale in (0.7, 0.8, 0.9, 1.0):
+                    m = masks(glyph, angle, scale, width, height)
+                    if not m:
+                        continue
+                    inside, ring, area_in, area_ring, gw, gh = m
+                    ci = cv2.matchTemplate(grad, inside.astype(np.float32), cv2.TM_CCORR)
+                    cr = cv2.matchTemplate(grad, ring.astype(np.float32), cv2.TM_CCORR)
+                    mx, center = peak(cr / area_ring - ci / area_in)
+                    if mx > best[0]:
+                        best = (mx, [center[0] + gw / 2.0, center[1] + gh / 2.0], (gw, gh))
+            if best[1] is None or best[0] < 15:
+                continue
+            gw, gh = best[2]
+            x1 = int(max(0, best[1][0] - gw / 2))
+            y1 = int(max(0, best[1][1] - gh / 2))
+            buf = BytesIO()
+            scene.crop((x1, y1, x1 + gw, y1 + gh)).save(buf, format="PNG")
+            votes = client.classification_votes(buf.getvalue())
+            if best[0] < 80 and not any(
+                self._char_sim(target, v) >= 0.85 for v in votes
+            ):
+                continue
+            blocked.append(best[1])
+            candidates.append({
+                "label": target,
+                "bbox": [x1, y1, x1 + gw, y1 + gh],
+                "center": best[1],
+            })
+            print(f"【word字形候选】{target} score={best[0]:.1f} center={[round(v, 1) for v in best[1]]}")
+        return candidates
+
     def _ocr_ques(self, client, q_path: str, q_bytes: bytes) -> str:
         white = self._to_white_png(q_bytes)
         results = []
@@ -399,19 +598,28 @@ class WordSolver:
         print(f"【word】scene_size={scene_w}x{scene_h}, ques_n={len(self.ques)}")
 
         targets = []
+        self._ques_bytes = []
         for q in self.ques:
             qb = self.load_image(f"https://static.geetest.com/{q}")
+            self._ques_bytes.append(qb)
             targets.append(self._ocr_ques(client, q, qb))
         print(f"【word目标字】{targets}")
         if not all(targets):
             raise RuntimeError(f"ques OCR 不完整: {targets}")
 
-        labeled = self._scene_labeled_boxes(client)
+        local = getattr(client, "local", False)
+        if local:
+            labeled = self._local_labeled_boxes(client, targets)
+        else:
+            labeled = self._scene_labeled_boxes(client)
         if not labeled:
             raise RuntimeError("场景未检出任何文字框")
 
         positions = self._assign(targets, labeled)
-        if not positions:
+        if not positions and local:
+            labeled = self._local_glyph_candidates(client, targets, labeled)
+            positions = self._assign(targets, labeled)
+        if not positions and not local:
             labeled = self._add_rotated_candidates(client, targets, labeled)
             positions = self._assign(targets, labeled)
         if not positions:
